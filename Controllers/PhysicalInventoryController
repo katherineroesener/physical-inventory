@@ -1,0 +1,187 @@
+<?php
+
+namespace app\controllers;
+
+use app\models\physical_inventory\PhysicalInventory;
+
+use Yii;
+use yii\web\Controller;
+use yii\data\ArrayDataProvider;
+use Exception;
+use yii\base\UserException;
+use yii\helpers\Json;
+
+class PhysicalInventoryController extends Controller
+{
+    public function actionIndex()
+    //if user is authorized to update inventory levels, display main index page
+    {
+        $model = new PhysicalInventory();
+
+        if (Yii::$app->user->can('Programs - Inventory - Physical Inventory')) {
+
+            if ($model->validate(['location'])) {
+
+                //displays a list of items to count, ordered by the date of their last inventory,
+                //from least-to-most recent
+                return $this->render('indexes/index', [
+                    'model' => $model,
+                    'dataProvider' => new ArrayDataProvider([
+                        'allModels' => $model->getLastInventoryDate('')
+                    ])
+                ]);
+
+            } else {
+
+                return $this->render('indexes/index', [
+                    'model' => $model,
+                    'dataProvider' => new ArrayDataProvider([])
+                ]);
+            }
+
+        } else {
+            throw UserException('Your permissions do not allow access to this page. Please contact the Purchasing Department to request authorization.');
+        }
+    }
+
+    public function actionProvideCount($product_id, $style)
+    //first entry of physical count, does calculations, returns variances and expected count
+    {
+        $model = new PhysicalInventory();
+        $model->product_id = $product_id;
+        $model->style = $style;
+
+        if (Yii::$app->user->can('Programs - Inventory - Physical Inventory')) {
+
+            if($model->validate(['product_id', 'style'])) {
+
+                //if data is submitted and passes validation
+                if ($model->load(Yii::$app->request->post()) && $model->validate()
+                ) {
+
+                    $model->unsetEmptyCounts(); //remove items with no counts entered
+                    $model->getExpectedResults(); //get qty that the system says we should have
+                    $model->submitZeroVarianceItems(); //if entered qty matches expected qty, submit immediately
+
+                    //if there are entries remaining (had variances and did not match system expected qty)
+                    if(count($model->size) !== 0) {
+
+                        //display items with variances, offer user a chance to review/count again/enter comments
+                        Yii::$app->session->setFlash('warning',
+                            'Please review the following variances before submitting. 
+                            If you believe a quantity was submitted in error, you may enter a revised count now.' . '<br>' . '
+                            (PLEASE NOTE: Revised counts will REPLACE existing counts - they will NOT be added to/decremented from the existing quantity.)');
+                        return $this->render( 'finalize-count', [
+                                'model' => $model,
+                            ]
+                        );
+
+                    } else {
+
+                        //if all user counts matched, display success message and redirect to main index page
+                        if(isset($model->size)) {
+                            if ($model->init_count) {
+                                Yii::$app->session->setFlash('success', 'Physical Inventory successfully updated for ' . $model->style . '.');
+                                return $this->render('indexes/index', [
+                                    'model' => $model,
+                                    'dataProvider' => new ArrayDataProvider([
+                                        'allModels' => $model->getLastInventoryDate($model->dept)
+                                    ])
+                                ]);
+                            }
+                            else {
+                                //if user submits page with zero counts entered, inventory will not be updated - redirect
+                                //to main index page with notification
+                                Yii::$app->session->setFlash('warning', 'No counts provided. Physical inventory was NOT updated.');
+                                return $this->render('indexes/index', [
+                                    'model' => $model,
+                                    'dataProvider' => new ArrayDataProvider([
+                                        'allModels' => $model->getLastInventoryDate($model->dept)
+                                    ])
+                                ]);
+                            }
+                        }
+                    }
+
+                } else {
+
+                    //initial page load; display all sizes of selected product and provide basic user instructions on how to continue
+                    $model->getSizes();
+
+                    Yii::$app->session->setFlash('info',
+                        'PLEASE NOTE: The quantities submitted on this page WILL alter inventory levels, effective immediately.
+                        Please enter 0 if the quantity counted was 0 - blank entries will not be updated.');
+                    return $this->render('physical-count', [
+                        'model' => $model,
+                    ]);
+
+                }
+
+            } else {
+
+                //mistakes were made, data not available
+                throw new Exception('Invalid product_id or style.');
+
+            }
+
+        } else {
+            //user must be authorized to update inventory levels
+            throw UserException('Your permissions do not allow access to this page. Please contact the Purchasing Department to request authorization.');
+        }
+    }
+
+    public function actionSubmit($product_id, $style)
+    //submits items with variances, after user reviews and approves them
+    {
+        $model = new PhysicalInventory();
+        $model->product_id = $product_id;
+        $model->style = $style;
+
+        if (Yii::$app->user->can('Programs - Inventory - Physical Inventory')) {
+
+            if ($model->load(Yii::$app->request->post()) && $model->validate()
+            ) {
+
+                $model->submitVarianceItems();
+
+                //return to main index page with success message
+                Yii::$app->session->setFlash('success', 'Physical Inventory successfully updated for ' . $model->style . '.');
+                return $this->render('indexes/index', [
+                    'model' => $model,
+                    'dataProvider' => new ArrayDataProvider([
+                        'allModels' => $model->getLastInventoryDate($model->dept)
+                    ])
+                ]);
+            }
+
+        } else {
+            throw UserException('Your permissions do not allow access to this page. Please contact the Purchasing Department to request authorization.');
+        }
+    }
+    
+    //directs to the variance report, so variances can be reviewed after the fact
+    public function actionResaleReport() {
+        
+        $model = new PhysicalInventoryReport();
+
+        if (Yii::$app->user->can('Programs - Inventory - Physical Inventory')) {
+
+            if ($model->load(Yii::$app->request->post()) && $model->validate()) {
+                return $this->render('/physical-inventory/resale-report', [
+                    'model' => $model,
+                    'dataProvider' => new ArrayDataProvider([
+                        'allModels' => $model->getResults()
+                    ]),
+                ]);
+            } else {
+                return $this->render('/physical-inventory/resale-report', [
+                    'model' => $model,
+                    'dataProvider' => NULL
+                ]);
+            }
+
+        } else {
+            throw UserException('Your permissions do not allow access to this page. Please contact the Purchasing Department to request authorization.');
+        }
+    }
+}
