@@ -1,0 +1,72 @@
+<?php
+
+/*
+ * Displays entered count for selected product_id and style, along with expected count and variance amounts. Prompts
+ * to recount variant entries, or accept and submit as final inventory count, with optional comment field.
+ */
+
+use yii\helpers\Html;
+use yii\bootstrap\ActiveForm;
+
+$this->title = 'Finalize Count' . ': ' . $model->style;
+
+foreach (Yii::$app->session->getAllFlashes() as $key => $message) {
+    echo '<div class="alert alert-' . $key . '">' . $message . '</div>';}
+?>
+
+<div class="text-center">
+    <h2><?= Html::encode($this->title) ?></h2>
+</div>
+
+<?php $form = ActiveForm::begin([
+    'action' => ['physical-inventory/submit', 'product_id' => $model->product_id, 'style' => $model->style],
+    ]);
+?>
+
+<?php foreach($model->size as $item_id => $arrayOfInfo): ?>
+    <div class="row">
+        <fieldset>
+            <legend><?= $arrayOfInfo['size'] ?></legend>
+
+            <div class="col-md-2 col-sm-6">
+                <?= $form->field($model, "size[$item_id][physicalCount]")->textInput(['type' => 'number', 'value' => $arrayOfInfo['phys_count'], 'readonly' => true])->label('Counted') ?>
+            </div>
+
+            <div class="col-md-2 col-sm-6">
+                    <?= $form->field($model, "size[$item_id][expectedCount]")->textInput(['type' => 'number', 'value' => $arrayOfInfo['on_hand'], 'readonly' => true])->label('Expected') ?>
+            </div>
+
+            <div class="col-md-2 col-sm-6">
+                    <?= $form->field($model, "size[$item_id][varianceAmount]")->textInput(['type' => 'number', 'value' => $arrayOfInfo['varianceAmount'], 'readonly' => true])->label('Variance Amount') ?>
+            </div>
+
+            <div class="col-md-2 col-sm-6">
+                    <?= $form->field($model, "size[$item_id][variancePercent]")->textInput(['value' => $arrayOfInfo['variancePercent'], 'readonly' => true])->label('Percentage Counted') ?>
+            </div>
+
+            <div class="col-md-2 col-sm-6">
+                <?= $form->field($model, "size[$item_id][finalCount]")->textInput(['type' => 'text', 'value' => $arrayOfInfo['finalCount']])->label('Revised Count:') ?>
+            </div>
+
+            <div class="col-md-2 col-sm-6">
+                <?= $form->field($model, "size[$item_id][comments]")->textInput(['type' => 'text', 'value' => $arrayOfInfo['comments']])->label('Comments') ?>
+            </div>
+
+        </fieldset>
+    </div>
+<?php endforeach; ?>
+    <div class="form-group" align="right">
+        <?= Html::submitButton('Submit Final Count', ['class' => 'btn btn-danger', 'name' => 'Submit Final Count']) ?>
+    </div>
+<?php ActiveForm::end(); ?>
+
+<?php $script =
+    <<<JS
+//disables the mouse scroll function for altering/inputting data in numeric fields (Firefox)
+$('input[type=number]').on('wheel', function(e){
+    return false;
+});
+
+JS;
+
+$this->registerJs($script);
