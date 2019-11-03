@@ -1,0 +1,60 @@
+<?php
+
+/*
+ * Count entry for selected product_id and style - there will need to multiple sizes for coats, shirts, vests; etc.;
+ * item_ids like pocket squares may only have one entry on the page
+ */
+
+use yii\helpers\Html;
+use yii\widgets\Breadcrumbs;
+use yii\bootstrap\ActiveForm;
+
+$this->title = 'Enter Physical Count' . ': ' . $model->style;
+
+foreach (Yii::$app->session->getAllFlashes() as $key => $message) {
+    echo '<div class="alert alert-' . $key . '">' . $message . '</div>';}
+?>
+
+<div class="col-xs-12 text-center">
+<h2><?= Html::encode($this->title) ?></h2>
+</div>
+
+<?php $form = ActiveForm::begin([]); ?>
+
+    <div class="row">
+        <div class="col-xs-2">
+            <?= $form->field($model, 'product_id')->inline()->textInput(['readonly' => true]) ?>
+        </div>
+        <div class="col-xs-2">
+            <?= $form->field($model, 'style')->inline()->textInput(['readonly' => true]) ?>
+        </div>
+    </div>
+
+<?php ActiveForm::end(); ?>
+
+<div class="row" style="margin-top: 2%">
+    <?php $form = ActiveForm::begin([
+        'action' => ['provide-count', 'product_id' => $model->product_id, 'style' => $model->style],
+        'layout' => 'horizontal',]); ?>
+
+    <?php foreach($model->size as $key => $value): ?>
+        <div class="col-sm-3">
+            <?= $form->field($model, "size[$key]")->inline()->textInput(['type' => 'number', 'value' => ''])->label($value) ?>
+        </div>
+    <?php endforeach; ?>
+</div>
+<div class="form-group" style="margin-left: 81%">
+    <?= Html::submitButton('Submit & Continue', ['class' => 'btn btn-primary', 'name' => 'physical-count']) ?>
+    <?php ActiveForm::end(); ?>
+</div>
+
+<?php $script =
+    <<<JS
+//disables the mouse scroll function for altering/inputting data in numeric fields (Firefox)
+$('input[type=number]').on('wheel', function(e){
+    return false;
+});
+
+JS;
+
+$this->registerJs($script);
