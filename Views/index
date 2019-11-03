@@ -1,0 +1,165 @@
+<?php
+
+use yii\helpers\Html;
+use yii\widgets\Breadcrumbs;
+use fedemotta\datatables\DataTables;
+use yii\helpers\Url;
+use yii\bootstrap\Nav;
+
+$this->title = 'Select Product to Inventory';
+try {
+    echo Breadcrumbs::widget([
+        'itemTemplate' => "<li>{link}</li>\n", // template for all links
+        'links' => [
+            [
+                'label' => 'Physical Inventory',
+                'url' => ['programs/physical-inventory-index'],
+            ],
+            'All Products',
+        ],
+    ]);
+} catch (Exception $e) {
+}
+
+foreach (Yii::$app->session->getAllFlashes() as $key => $message) {
+    echo '<div class="alert alert-' . $key . '">' . $message . '</div>';}
+?>
+
+<div class="col-xs-12 text-center"">
+<h2><?= Html::encode($this->title) ?></h2>
+</div>
+
+<br>
+<br>
+
+<div class="nav-widget">
+    <?php
+    echo Nav::widget([
+        'items' => [
+            [
+                'label' => 'Coats',
+                'url' => ['physical-inventory/index-coats'],
+                'linkOptions' => [],
+            ],
+            [
+                'label' => 'Pants',
+                'url' => ['physical-inventory/index-pants'],
+                'linkOptions' => [],
+            ],
+            [
+                'label' => 'Shirts & Accessories',
+                'url' => ['physical-inventory/index-shirts'],
+                'linkOptions' => [],
+            ],
+            [
+                'label' => 'Shoes',
+                'url' => ['physical-inventory/index-shoes'],
+                'linkOptions' => [],
+            ],
+            [
+                'label' => 'Misc.',
+                'url' => ['physical-inventory/index-misc'],
+                'linkOptions' => [],
+            ],
+        ],
+        'options' => ['class' =>'nav-pills'], // set this to nav-tab to get tab-styled navigation
+    ]);
+    ?>
+</div>
+
+
+<br>
+<br>
+
+<div>
+
+    <?php try {
+
+        if(Yii::$app->user->can('Programs - Inventory - Physical Inventory')):
+        echo
+        DataTables::widget([
+            'dataProvider' => $dataProvider,
+            'clientOptions' => [
+                "lengthMenu" => [[20, -1], [20, Yii::t('app', "All")]],
+                "info" => false,
+                "responsive" => true,
+                "dom" => 'lfTrtip',
+                "tableTools" => [
+                    "aButtons" => [
+                        [
+                            "sExtends" => "copy",
+                            "sButtonText" => Yii::t('app', "Copy to clipboard")
+                        ], [
+                            "sExtends" => "csv",
+                            "sButtonText" => Yii::t('app', "Save to CSV")
+                        ], [
+                            "sExtends" => "xls",
+                            "oSelectorOpts" => ["page" => 'current']
+                        ], [
+                            "sExtends" => "pdf",
+                            "sButtonText" => Yii::t('app', "Save to PDF")
+                        ], [
+                            "sExtends" => "print",
+                            "sButtonText" => Yii::t('app', "Print")
+                        ],
+                    ]
+                ]
+            ],
+            'columns' => [
+                ['class' => 'yii\grid\SerialColumn'],
+                [
+                    'attribute' => 'DEPT_NAME',
+                    'format' => 'text',
+                    'label' => 'Department',
+                    'headerOptions' => ['text-center']
+                ],
+                [
+                    'attribute' => 'product_id',
+                    'format' => 'text',
+                    'label' => 'Product',
+                    'headerOptions' => ['text-center']
+                ],
+                [
+                    'attribute' => 'STYLE',
+                    'format' => 'text',
+                    'label' => 'Style',
+                    'headerOptions' => ['text-center']
+                ],
+                [
+                    'attribute' => 'LAST_INVENTORY_DATE',
+                    'format' => 'date',
+                    'label' => 'Last Inventory Date',
+                    'headerOptions' => ['text-center']
+                ],
+
+                ['class' => 'yii\grid\ActionColumn',
+                    'template' => '{create}',
+                    'header' => 'Count Now',
+                    'buttons' => [
+                        'create' => function ($url, $model) {
+                            $url = Url::to(['physical-inventory/provide-count', 'product_id' => rtrim($model['product_id']), 'style' => rtrim($model['STYLE'])]);
+                            return Html::a('<span class="glyphicon glyphicon-hand-right"></span>', $url, [
+                                'title' => Yii::t('yii', 'Count'),
+                            ]);
+
+                        }
+                    ]
+                ],
+            ]
+        ]);
+        endif;
+    } catch (Exception $e) {
+
+        echo $e;
+    }
+    ?>
+</div>
+
+<?php $this->registerCss("
+.nav-widget {
+    margin: auto;
+    position: relative;
+    text-align: center;
+    width: 38%;
+}
+"); ?>
