@@ -1,0 +1,890 @@
+<?php
+
+    /*
+    * inventory stock levels are affected by multiple factors, such as the sorting into web inventory vs. 
+    * regular inventory, and orders for future dates that may or may not have items already pulled from
+    * the stock that's being inventoried, depending on where these orders were at in the production process
+    * (and given the fact that production continues while inventory counts are taking place).
+    */
+
+namespace app\models\physical_inventory;
+
+use Yii;
+use yii\base\Model;
+use yii\web\Application;
+
+class PhysicalInventory extends Model
+{
+    public
+        $location,
+        $dept,
+        $item_id, //internal item number
+        $product_id, //product descriptor (coat, pant, shirt, etc.)
+        $style, 
+        $size, //concatenated value of size fields
+        $label, //user-readable size label
+        $on_hand, //actual physical qty owned
+        $bookings, //qty of regular orders
+        $adjustments, //manual inventory adjustments
+        $web_bookings, //qty of online orders
+        $system_in_stock, //calculated number available (after future orders are deducted)
+        $web_in_stock, //online inventory
+        $calc_in_stock, 
+        $system_filled, 
+        $system_unfilled, 
+        $web_unfilled, 
+        $prev_web_unfilled,
+        $init_count, //user first count
+        $phys_count, 
+        $final_count, //user final count
+        $variance_amt, 
+        $variance_percent,
+        $physical_qtysts,
+        $instock_qtysts,
+        $comments, 
+        $results,
+        $validSizes, 
+        $validItems,
+        $user, 
+        $program, 
+        $date,
+        $size_field_1, 
+        $size_field_2, 
+        $size_field_3, 
+        $size_field_4;
+
+    public function rules()
+    {
+        return [
+            [['location', 'product_id', 'style'], 'required'],
+            [['location', 'product_id', 'dept'], 'string', 'length' => 2],
+            ['date', 'date', 'format' => 'php:Y-m-d'],
+            ['variance_percent', 'string'],
+            [['item', 'on_hand', 'init_count', 'phys_count', 'final_count', 'variance_amt', 'system_filled',
+                'system_unfilled', 'web_unfilled', 'prev_web_unfilled', 'bookings', 'adjustments',
+                'web_bookings', 'system_in_stock', 'web_in_stock', 'calc_in_stock'], 'integer'],
+            ['comments', 'string', 'length' => [0,250]],
+            [['physical_qtysts', 'instock_qtysts'], 'integer', 'min' => -9999999, 'max' => 9999999],
+            [['user', 'program'], 'string'],
+            ['size_field_1', 'validateItem'],
+            ['size', 'safe'],
+            [['size_field_2', 'size_field_3', 'size_field_4'], 'safe']
+        ];
+    }
+
+    public function init()
+    {
+        $this->user = Yii::$app instanceof Application ? Yii::$app->user->identity->getUser() : null;
+        $this->location = Yii::$app instanceof Application ? Yii::$app->user->identity->getlocation() : null;
+        $this->program = 'INVENTORY';
+        $this->date = date('Y-m-d');
+    }
+
+    public function getLastInventoryDate($dept)
+        //gets list of product_id's and displays them by location, in order of last inventory date
+    {
+        $query = "
+        
+                SELECT DISTINCT
+                    i.product_id, i.style, max(coalesce(p.last_inv_date, i.last_inv_date)) as last_inventory_date, i.dept_name
+                FROM
+                    (SELECT DISTINCT
+                        sum.product_id as product_id, sum.style as style, sum.status as status, coalesce(cast(sum.timestamp as date), date(01-01-0001)) as last_inv_date, 
+                        dept.dept_name as dept_name
+                    FROM
+                        summary_table as sum
+                    JOIN
+                        styles_table as style
+                    ON
+                        sum.district = style.district
+                        and sum.location = style.location
+                        and sum.product_id = style.product_id
+                        and sum.style = style.style
+                        and (wholesale = 'Y' or collection = 'FOR_PURCHASE' or purchase_only = 'Y')
+                        and style.active = 'Y'
+                        and (style.discontinued > current date or style.discontinued = '0001-01-01')
+                    LEFT JOIN
+                        items_table as item
+                    ON
+                        item.district = sum.district
+                        and item.item = sum.item
+                        and sum.product_id = item.product_id
+                        and sum.style = item.style
+                        and sum.size_field_1 = item.size_field_1
+                        and sum.size_field_2 = item.size_field_2
+                        and sum.size_field_3 = item.size_field_3
+                        and sum.size_field_4 = item.size_field_4
+                        and item.active = 'Y'
+                    LEFT JOIN
+                        departments_table as dept
+                    ON 
+                        dept.product_id = sum.product_id
+                    WHERE
+                        sum.status = 'I'
+                        and sum.status not in ('P')
+                        and sum.style not in ('ALL')
+                        and dept.dept not in ('ALL')
+                        and item.active = 'Y'
+                        and sum.location = :location1
+                    ";
+
+        if($dept !== "" && $dept !== null) {
+
+            $query .= ' and dept.dept = :dept1';
+
+        }
+
+        $query .= "
+                    GROUP BY
+                            sum.style, sum.product_id, dept.dept_name, sum.timestamp, sum.status
+                            order by last_inv_date
+                        )i
+                    FULL OUTER JOIN
+                        (SELECT DISTINCT
+                            sum.product_id as product_id, sum.style as style, coalesce(cast(sum.timestamp as date), date(01-01-0001)) as last_inv_date, 
+                            dept.dept_name as dept_name
+                        FROM
+                            summary_table as sum
+                        JOIN
+                            styles_table as style
+                        ON
+                            sum.district = style.district
+                            and sum.location = style.location
+                            and sum.product_id = style.product_id
+                            and sum.style = style.style
+                            and (wholesale = 'Y' or collection = 'FOR_PURCHASE' or purchase_only = 'Y')
+                            and style.active = 'Y'
+                            and (style.discontinued > current date or style.discontinued = '0001-01-01')
+                        LEFT JOIN
+                            items_table as item
+                        ON
+                            item.district = sum.district
+                            and item.item = sum.item
+                            and sum.style = item.style
+                            and sum.size_field_1 = item.size_field_1
+                            and sum.size_field_2 = item.size_field_2
+                            and sum.size_field_3 = item.size_field_3
+                            and sum.size_field_4 = item.size_field_4 
+                            and sum.item = item.item 
+                            and item.active = 'Y' 
+                        LEFT JOIN
+                            departments_table as dept
+                        ON
+                            dept.product_id = sum.product_id
+                        WHERE
+                            sum.status = 'P'
+                            and sum.style not in ('ALL')
+                            and dept.dept not in ('ALL')
+                            and item.active = 'Y'
+                            and sum.location = :location2   
+        ";
+
+        if($dept !== "" && $dept !== null) {
+
+            $query .= ' and dept.dept = :dept2';
+
+        }
+
+        $query .= " GROUP BY
+                            sum.product_id, sum.style, dept.dept_name, sum.timestamp
+                        )p
+                    ON
+                        i.product_id = p.product_id
+                        and i.style = p.style
+                        and i.dept_name = p.dept_name
+                    GROUP BY
+                        i.product_id, i.style, i.dept_name
+                    ORDER BY
+                        last_inventory_date
+              ";
+
+        if($dept != "") {
+            $results = Yii::$app->db2->createCommand($query)
+                ->bindParam(':location1', $this->location)
+                ->bindParam(':location2', $this->location)
+                ->bindParam(':dept1', $dept)
+                ->bindParam(':dept2', $dept)
+                ->queryAll();
+
+        } else {
+            $results = Yii::$app->db2->createCommand($query)
+                ->bindParam(':location1', $this->location)
+                ->bindParam(':location2', $this->location)
+                ->queryAll();
+        }
+
+        if ($results) {
+
+            foreach ($results as $r) {
+
+                $this->date = $r['LAST_INVENTORY_DATE'];
+                $this->dept = $r['DEPT_NAME'];
+                $this->product_id = $r['PRODUCT_ID'];
+                $this->style = $r['STYLE'];
+            }
+        }
+
+        return $results;
+    }
+
+    public function getSizes()
+        //get available sizes to be counted based on product_id and style selection
+    {
+        $query = "
+                SELECT
+                    item, trim(item.size_field_1) || trim(item.size_field_2) || trim(item.size_field_3) || trim(item.size_field_4) as size
+                FROM
+                    items_table as item
+                LEFT JOIN
+                    groupings_table as group
+                ON
+                    item.product_id = group.product_id
+                    and item.size_field_1 = group.size_field_1
+                    and item.size_field_2 = group.size_field_2
+                    and item.size_field_3 = group.size_field_3
+                    and item.size_field_4 = group.size_field_4
+                WHERE
+                    item.product_id = :product_id
+                    and item.style = :style
+                    and item.active = 'Y'
+                ORDER BY
+                    group.order_groups, group.group_order
+        ";
+
+        $results = Yii::$app->db2->createCommand($query)
+            ->bindParam(':product_id', $this->product_id)
+            ->bindParam(':style', $this->style)
+            ->queryAll();
+
+        if ($results) {
+
+            foreach ($results as $r) {
+
+                $this->size[$r['ITEM']] = $r['SIZE'];
+
+                foreach ($this->size as $key => $value)
+                {
+                    $this->phys_count[] = [$key => $value];
+                }
+
+            }
+
+        } else {
+
+            $this->size = [];
+        }
+
+        return $this->size;
+
+    }
+
+    public function unsetEmptyCounts()
+    {
+        //unset items that were left empty with no count provided, so it doesn't overwrite existing record
+
+        foreach($this->size as $item => $count) {
+
+            if($count === '') {
+
+                unset($this->size[$item]);
+
+            }
+        }
+    }
+
+    public function callStoredProcedure()
+    {
+        $call = "CALL inventory_procedure(:location, :product_id, :style)";
+
+        return Yii::$app->db2->createCommand($call)
+            ->bindParam(':location', $this->location)
+            ->bindParam(':product_id', $this->product_id)
+            ->bindParam(':style', $this->style)
+            ->queryAll();
+    }
+
+    public function parseStoredProcedure()
+    {
+        $procedure = $this->callStoredProcedure();
+
+        foreach ($procedure as $p) {
+
+            $item = $p['ITEM'];
+
+            $newProcedure[$item] = [
+
+                'system_filled' => $p['FILLED_ORDERS'],
+                'system_unfilled' => $p['UNFILLED_ORDERS'],
+                'web_unfilled' => $p['WEB UNFILLED'],
+                'prev_web_unfilled' => $p['PREV_WEB_UNFILLED'],
+                'bookings' => $p['FILLED_ORDERS'],
+                'adjustments' => $p['ADJUSTMENTS'],
+                'web_bookings' => $p['WEB_ORDERS'],
+                'system_in_stock' => $p['IN_STOCK'],
+                'web_in_stock' => $p['WEB_IN_STOCK'],
+                'calc_in_stock' => $p['CALC_IN_STOCK'],
+            ];
+        }
+
+        return $newProcedure;
+    }
+
+    public function validateItemExistsInSystem($product_id, $style, $item) {
+
+        $query = "
+                SELECT
+                    district
+                FROM
+                    items_table
+                WHERE
+                    district = 1
+                    and product_id = :product_id
+                    and style = :style
+                    and item = :item      
+                        ";
+
+        $results = Yii::$app->db2->createCommand($query)
+            ->bindParam(':product_id', $product_id)
+            ->bindParam(':style', $style)
+            ->bindParam(':item', $item)
+            ->queryAll();
+
+        if ($results) {
+
+            return true;
+
+        } else {
+
+            return false;
+        }
+    }
+
+    public function getsystemFutures($location, $item) {
+
+        $query = "
+                SELECT
+                    case when
+                        ordsts in('K', 'P', 'G', 'H')
+                    then sum(qtyord) else 0 end as unfilled,
+                    case when
+                        ordsts in('A', 'B', 'S', 'C')
+                    then sum(qtyord) else 0 end as filled
+                FROM
+                    orders_table
+                WHERE
+                    district = 1
+                    and location = :location
+                    and pweek > current date
+                    and ordsts != 'D'
+                    and item = :item
+                GROUP BY
+                    ordsts, qtyord  
+                        ";
+
+        return Yii::$app->db2->createCommand($query)
+            ->bindParam(':location', $location)
+            ->bindParam(':item', $item)
+            ->queryAll();
+    }
+
+    public function calculateVariances($item, $count, $on_hand)
+    {
+        $parsedResults = [];
+
+        if($count != $on_hand) {
+
+            $varianceAmount = intval($count) - intval($on_hand);
+            if ($on_hand != 0) {
+                $variancePercent = round((float)(intval($count) / intval($on_hand)) * 100) . '%';
+            } else {
+                $variancePercent = 'N/A'; //can't divide by zero - no percentage given if expected count is 0.
+            }
+            $parsedResults[$item] = [
+                'phys_count' => $count,
+                'varianceAmount' => $varianceAmount,
+                'variancePercent' => $variancePercent,
+                'comments' => $this->comments,
+            ];
+
+        } elseif ($count == $on_hand) {
+
+            $parsedResults[$item] = [
+                'phys_count' => $count,
+                'varianceAmount' => 0,
+                'variancePercent' => 0 . '%',
+                'comments' => '' //this is the fallthrough - won't have opportunity to leave comments
+
+            ];
+        }
+
+        $this->results = $parsedResults;
+
+        return $parsedResults;
+
+    }
+
+    public function getLabel($item)
+        //gets size label
+    {
+        $label = "
+                SELECT
+                    trim(size_field_1) || trim(size_field_2) || trim(size_field_3) || trim(size_field_4) as label,
+                    trim(size_field_1) as size_field_1,
+                    trim(size_field_2) as size_field_2,
+                    trim(size_field_3) as size_field_3,
+                    trim(size_field_4) as size_field_4
+                FROM
+                    items_table
+                WHERE
+                    item = :item
+                    and active = 'Y'
+                ORDER BY
+                    size_field_1, size_field_2, size_field_3, size_field_4
+        ";
+
+        $results = Yii::$app->db2->createCommand($label)
+            ->bindParam(':item', $item)
+            ->queryAll();
+
+        foreach ($results as $r) {
+            $this->label = $r['LABEL'];
+            $this->size_field_1 = $r['size_field_1'];
+            $this->size_field_2 = $r['size_field_2'];
+            $this->size_field_3 = $r['size_field_3'];
+            $this->size_field_4 = $r['size_field_4'];
+        }
+
+        return $results;
+    }
+
+    public function getExpectedResults()
+    //get on_hand, future_filled (system), future_unfilled (system) and web_unfilled order quantities
+    {
+        $results = $this->callStoredProcedure();
+
+        if ($results) { // We have results from the stored procedure.
+
+            foreach ($this->size as $item => $count) { // Go through the results.
+
+                $existsInResults = false;
+
+                foreach($results as $r) {
+
+                    if($item == $r['ITEM']) {
+
+                        if ($r['ON_HAND'] <= 0) {
+
+                            $on_hand = 0;
+
+                        } else {
+
+                            $on_hand = $r['ON_HAND'];
+                        }
+
+                        $this->calculateVariances($item, $count, $on_hand);
+
+                        $existsInResults = true;
+
+                        $this->size[$item] = [
+                            'size' => $this->getLabel($item)[0]['LABEL'],
+                            'phys_count' => $count,
+                            'on_hand' => $on_hand,
+                            'system_filled' => $r['FILLED_ORDERS'],
+                            'system_unfilled' => $r['UNFILLED_ORDERS'],
+                            'web_unfilled' => $r['WEB_UNFILLED'],
+                            'prev_web_unfilled' => $r['PREVIOUS_WEB_UNFILLED'],
+                            'bookings' => $r['FILLED_ORDERS'],
+                            'adjustments' => $r['ADJUSTMENTS'],
+                            'web_bookings' => $r['WEB_BOOKINGS'],
+                            'system_in_stock' => $r['IN_STOCK'],
+                            'web_in_stock' => $r['WEB_IN_STOCK'],
+                            'calc_in_stock' => $r['CALC_IN_STOCK'],
+                            'finalCount' => '',
+                            'varianceAmount' => $this->results[$item]['varianceAmount'],
+                            'variancePercent' => $this->results[$item]['variancePercent'],
+                            'comments' => $this->comments
+                        ];
+                    }
+                }
+
+                if(!$existsInResults) {
+
+                    if($this->validateItemExistsInSystem($this->product_id, $this->style, $item)) {
+
+                        $futures = $this->getsystemFutures($this->location, $item);
+
+                        if ($futures) {
+
+                            $this->size[$item] = [
+                                'size' => $this->getLabel($item)[0]['LABEL'],
+                                'phys_count' => $count,
+                                'on_hand' => $count,  //using their count as on_hand since we don't have any recent record to districtare against
+                                'system_filled' => $futures['FILLED'],
+                                'system_unfilled' => $futures['UNFILLED'],
+                                'web_unfilled' => 0,
+                                'prev_web_unfilled' => 0,
+                                'varianceAmount' => 0,
+                                'variancePercent' => 0,
+                                'bookings' => 0,
+                                'adjustments' => 0,
+                                'web_bookings' => 0,
+                                'in_stock' => 0,
+                                'web_in_stock' => 0,
+                                'calc_in_stock' => 0,
+                                'finalCount' => '',
+                                'comments' => $this->comments,
+                            ];
+
+                        } else {
+
+                            $this->size[$item] = [
+                                'size' => $this->getLabel($item)[0]['LABEL'],
+                                'phys_count' => $count,
+                                'on_hand' => $count,  //using their count as on_hand since we don't have any recent record to districtare against
+                                'system_filled' => 0,
+                                'system_unfilled' => 0,
+                                'web_unfilled' => 0,
+                                'prev_web_unfilled' => 0,
+                                'varianceAmount' => 0,
+                                'variancePercent' => 0,
+                                'bookings' => 0,
+                                'adjustments' => 0,
+                                'web_bookings' => 0,
+                                'in_stock' => 0,
+                                'web_in_stock' => 0,
+                                'calc_in_stock' => 0,
+                                'finalCount' => '',
+                                'comments' => $this->comments,
+                            ];
+                        }
+                    } else {
+
+                        throw new \Exception('Not a valid item for product and style.');
+                    }
+                }
+            }
+
+        } else {
+
+            // Stored procedure had nothing. We got to use what we got.
+
+            foreach($this->size as $item => $count) {
+
+                if($this->validateItemExistsInSystem($this->product_id, $this->style, $item)) {
+
+                    $futures = $this->getsystemFutures($this->location, $item);
+
+                    if ($futures) {
+
+                        $this->size[$item] = [
+                            'size' => $this->getLabel($item)[0]['LABEL'],
+                            'phys_count' => $count,
+                            'on_hand' => $count,
+                            'system_filled' => $futures['FILLED'],
+                            'system_unfilled' => $futures['UNFILLED'],
+                            'web_unfilled' => 0,
+                            'prev_web_unfilled' => 0,
+                            'varianceAmount' => 0,
+                            'variancePercent' => 0,
+                            'bookings' => 0,
+                            'adjustments' => 0,
+                            'web_bookings' => 0,
+                            'in_stock' => 0,
+                            'web_in_stock' => 0,
+                            'calc_in_stock' => 0,
+                            'finalCount' => '',
+                            'comments' => $this->comments,
+                        ];
+
+                    } else {
+
+                        $this->size[$item] = [
+                            'size' => $this->getLabel($item)[0]['LABEL'],
+                            'phys_count' => $count,
+                            'on_hand' => $count,
+                            'system_filled' => 0,
+                            'system_unfilled' => 0,
+                            'web_unfilled' => 0,
+                            'prev_web_unfilled' => 0,
+                            'varianceAmount' => 0,
+                            'variancePercent' => 0,
+                            'bookings' => 0,
+                            'adjustments' => 0,
+                            'web_bookings' => 0,
+                            'system_in_stock' => 0,
+                            'web_in_stock' => 0,
+                            'calc_in_stock' => 0,
+                            'finalCount' => '',
+                            'comments' => $this->comments,
+                        ];
+                    }
+
+                } else {
+
+                    throw new \Exception('Not a valid item for product and style.');
+
+                }
+            }
+        }
+    }
+
+    public function calculateInventory($count, $system_F, $system_UF, $web_UF, $web_prev)
+        //does calculations on phys_count with system orders and web orders to set inventory in-stock levels
+    {
+        $this->physical_qtysts = ((($count - $web_UF) - $web_prev) + $system_F);
+        $this->instock_qtysts = (($this->physical_qtysts - $system_F) - $system_UF);
+    }
+
+    public function setPhysical()
+        //sets physical inventory amount
+    {
+        $physical = "CALL set_inventory_amt(:location, :item, 'P', :qtysts, :user, :program)";
+
+        return Yii::$app->db2->createCommand($physical)
+            ->bindParam(':location', $this->location)
+            ->bindParam(':item', $this->item)
+            ->bindParam(':qtysts', $this->physical_qtysts)
+            ->bindParam(':user', $this->user)
+            ->bindParam(':program', $this->program)
+            ->execute();
+    }
+
+    public function setInstock()
+        //sets in-stock amount
+    {
+        $instock = "CALL set_instock_amt(:location, :item, 'I', :qtysts, :user, :program)";
+
+        return Yii::$app->db2->createCommand($instock)
+            ->bindParam(':location', $this->location)
+            ->bindParam(':item', $this->item)
+            ->bindParam(':qtysts', $this->instock_qtysts)
+            ->bindParam(':user', $this->user)
+            ->bindParam(':program', $this->program)
+            ->execute();
+    }
+
+    public function submitZeroVarianceItems()
+    {
+        foreach ($this->size as $item => $count) {
+
+            if ($count['varianceAmount'] === 0) {
+
+                $this->item = $item;
+                $this->on_hand = $count['on_hand'];
+                $this->init_count = $count['phys_count'];
+                $this->final_count = $count['phys_count'];
+                $this->variance_amt = "0";
+                $this->variance_percent = "0%";
+                $this->system_filled = $count['system_filled'];
+                $this->system_unfilled = $count['system_unfilled'];
+                $this->web_unfilled = $count['web_unfilled'];
+                $this->prev_web_unfilled = $count['prev_web_unfilled'];
+                $this->bookings = $count['bookings'];
+                $this->adjustments = $count['adjustments'];
+                $this->web_bookings = $count['web_bookings'];
+                $this->system_in_stock = $count['system_in_stock'];
+                $this->web_in_stock = $count['web_in_stock'];
+                $this->calc_in_stock = $count['calc_in_stock'];
+                $this->comments = ''; //setting to '' since they won't have the opportunity to leave comments
+
+                $this->getLabel($item);
+                $this->calculateInventory($this->final_count, $this->system_filled, $this->system_unfilled, $this->web_unfilled, $this->prev_web_unfilled);
+                
+                $this->submitCount();
+
+                unset($this->size[$item]);
+            }
+        }
+    }
+
+    public function submitVarianceItems()
+    {
+        foreach ($this->size as $item => $count) {
+
+            if ($count['varianceAmount'] != 0) {
+
+                if (($count['finalCount'] !== '') && ($count['finalCount'] !== NULL)) {
+                    /*
+                     * the following logic to recalculate variances isn't strictly necessary, since no one will see the new variances;
+                     * however, since I had it I kept it, in case it's needed/wanted in future.
+                     */
+                    $var = $this->calculateVariances($item, $count['finalCount'], $count['expectedCount']);
+                    $this->final_count = $count['finalCount'];
+                    $this->variance_amt = $var[$item]['varianceAmount'];
+                    $this->variance_percent = $var[$item]['variancePercent'];
+                } else {
+                    $this->final_count = $count['physicalCount'];
+                    $this->variance_amt = $count['varianceAmount'];
+                    $this->variance_percent = $count['variancePercent'];
+                }
+
+                if ($count['comments']) {
+                    $this->comments = $count['comments'];
+                } else {
+                    $this->comments = '';
+                }
+
+                $this->item = $item;
+                $this->on_hand = $count['expectedCount'];
+                $this->init_count = $count['physicalCount'];
+
+                $procedure = $this->parseStoredProcedure();
+
+                $this->system_filled = $procedure[$item]['system_filled'];
+                $this->system_unfilled = $procedure[$item]['system_unfilled'];
+                $this->web_unfilled = $procedure[$item]['web_unfilled'];
+                $this->prev_web_unfilled = $procedure[$item]['prev_web_unfilled'];
+                $this->bookings = $procedure[$item]['bookings'];
+                $this->adjustments = $procedure[$item]['adjustments'];
+                $this->web_bookings = $procedure[$item]['web_bookings'];
+                $this->system_in_stock = $procedure[$item]['system_in_stock'];
+                $this->web_in_stock = $procedure[$item]['web_in_stock'];
+                $this->calc_in_stock = $procedure[$item]['calc_in_stock'];
+
+                $this->getLabel($item);
+                $this->calculateInventory($this->final_count, $this->system_filled, $this->system_unfilled, $this->web_unfilled, $this->prev_web_unfilled);
+                
+                $this->submitCount();
+                
+            }
+        }
+    }
+
+    public function submitCount()
+        //submits finalized data to the inventory and summary tables
+    {
+
+        if(!$this->validate()) {
+
+            throw new \Exception("Something went horribly wrong! Item: $this->item. Product: $this->product_id. Style: $this->style. Size: $this->label.");
+            return;
+
+        }
+
+        $this->setPhysical();
+        $this->setInstock();
+        
+        $insert = "
+                INSERT INTO
+                    inventory_table
+                    (location, item, product_id, style, label, on_hand, init_count, fin_count, comments, fut_fill, fut_unfill, web_unfil, 
+                    prev_web, bookings, adjustments, web_bookings, system_in_stock, web_in_stock, calc_in_stock, user, program)
+                VALUES
+                    (:location, :item, :product_id, :style, :label, :on_hand, :init_count, :fin_count, :comments, :fut_fill, :fut_unfill, :web_unfil, 
+                    :prev_web_unfilled, :bookings, :adjustments, :web_bookings, :system_in_stock, :web_in_stock, :calc_in_stock, :user, :program)
+                        ";
+
+        $this->validSizes = Yii::$app->db2->createCommand($insert)
+            ->bindParam(':location', $this->location)
+            ->bindParam(':item', $this->item)
+            ->bindParam(':product_id', $this->product_id)
+            ->bindParam(':style', $this->style)
+            ->bindParam(':label', $this->label)
+            ->bindParam(':on_hand', $this->on_hand)
+            ->bindParam(':init_count', $this->init_count)
+            ->bindParam(':fin_count', $this->final_count)
+            ->bindParam(':comments', $this->comments)
+            ->bindParam(':fut_fill', $this->system_filled)
+            ->bindParam(':fut_unfill', $this->system_unfilled)
+            ->bindParam(':web_unfil', $this->web_unfilled)
+            ->bindParam(':prev_web_unfilled', $this->prev_web_unfilled)
+            ->bindParam(':bookings', $this->bookings)
+            ->bindParam(':adjustments', $this->adjustments)
+            ->bindParam(':web_bookings', $this->web_bookings)
+            ->bindParam(':system_in_stock', $this->system_in_stock)
+            ->bindParam(':web_in_stock', $this->web_in_stock)
+            ->bindParam(':calc_in_stock', $this->calc_in_stock)
+            ->bindParam(':user', $this->user)
+            ->bindParam(':program', $this->program)
+            ->execute();
+    }
+
+    public function validateSizes()
+    {
+        $validSizes = [];
+
+        foreach ($this->getSizes() as $size) {
+
+            $validSizes[] = $size['SIZE'];
+        }
+
+        foreach ($this->size as $size => $active) {
+
+            if (!in_array($size, $validSizes)) {
+
+                $this->addError('size', 'Size is not valid.');
+            }
+        }
+    }
+
+    public function getValidItems()
+    {
+        if(isset($this->validItems)) {
+
+            return $this->validItems;
+        }
+        $query = "
+                    SELECT DISTINCT
+                        item.size_field_1 || item.size_field_2 || item.size_field_3 || item.size_field_4 as size
+                    FROM
+                        styles_table as styl
+                    LEFT JOIN
+                        items_table as item
+                    ON
+                        styl.district = item.district
+                        and styl.style = item.style
+                        and styl.product_id = styl.product_id
+                    WHERE
+                        styl.district = 1
+                        and styl.active = 'Y'
+                        and styl.wholesale = 'Y'
+                        and styl.location = :location
+                        and styl.product_id = :product_id
+                        and styl.style = :style
+                        and item.active = 'Y'
+                   ";
+
+        $this->validItems = Yii::$app->db2->createCommand($query)
+            ->bindParam(':location', $this->location)
+            ->bindParam(':product_id', $this->product_id)
+            ->bindParam(':style', $this->style)
+            ->queryAll();
+
+        return $this->validItems;
+    }
+    
+    
+    /**
+     * Validates that the item submitted is of the correct product_id, style, size_field_1-4.
+     */
+        
+    public function validateItem($attribute, $params)
+    {
+        $query = "
+        SELECT
+            1
+        FROM
+          items_table
+        WHERE
+            district = 1
+            and product_id = :product_id
+            and style = :style
+            and size_field_1 = :size_field_1
+            and size_field_2 = :size_field_2
+            and size_field_3 = :size_field_3
+            and size_field_4 = :size_field_4
+            and active = 'Y'
+        ";
+
+        $result = Yii::$app->db2->createCommand($query)
+            ->bindParam(':product_id', $this->product_id)
+            ->bindParam(':style', $this->style)
+            ->bindParam(':size_field_1', $this->size_field_1)
+            ->bindParam(':size_field_2', $this->size_field_2)
+            ->bindParam(':size_field_3', $this->size_field_3)
+            ->bindParam(':size_field_4', $this->size_field_4)
+            ->queryAll();
+
+        return $result ? true : false;
+    }
+}
